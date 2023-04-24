@@ -3,7 +3,7 @@ from typing import Any
 import torch
 from lightning import LightningModule
 from torchmetrics import MaxMetric, MeanMetric
-from torchmetrics.classification.accuracy import Accuracy
+from src.models.detr.models import build_model
 
 
 class DETRModule(LightningModule):
@@ -33,15 +33,12 @@ class DETRModule(LightningModule):
         # also ensures init params will be stored in ckpt
         self.save_hyperparameters(logger=False)
 
-        self.net = net
-
-        # loss function
-        self.criterion = torch.nn.CrossEntropyLoss()
+        self.net, self.criterion, self.postprocessors = build_model(args)
 
         # metric objects for calculating and averaging accuracy across batches
-        self.train_acc = Accuracy(task="multiclass", num_classes=10)
-        self.val_acc = Accuracy(task="multiclass", num_classes=10)
-        self.test_acc = Accuracy(task="multiclass", num_classes=10)
+        # self.train_acc = Accuracy(task="multiclass", num_classes=10)
+        # self.val_acc = Accuracy(task="multiclass", num_classes=10)
+        # self.test_acc = Accuracy(task="multiclass", num_classes=10)
 
         # for averaging loss across batches
         self.train_loss = MeanMetric()

@@ -2,16 +2,12 @@
 """
 DETR model and criterion classes.
 """
-import os
-import sys
-
-sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 import torch
 import torch.nn.functional as F
 from torch import nn
 
-from util import box_ops
-from util.misc import (
+from src.models.detr.util import box_ops
+from src.models.detr.util.misc import (
     NestedTensor,
     nested_tensor_from_tensor_list,
     accuracy,
