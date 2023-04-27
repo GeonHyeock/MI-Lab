@@ -3,6 +3,7 @@ from typing import Any
 import torch
 from lightning import LightningModule
 from torchmetrics import MaxMetric, MeanMetric
+from torchmetrics.classification.accuracy import Accuracy
 from src.models.detr.models import build_model
 
 
@@ -23,7 +24,7 @@ class DETRModule(LightningModule):
 
     def __init__(
         self,
-        net: torch.nn.Module,
+        args,
         optimizer: torch.optim.Optimizer,
         scheduler: torch.optim.lr_scheduler,
     ):
@@ -36,9 +37,9 @@ class DETRModule(LightningModule):
         self.net, self.criterion, self.postprocessors = build_model(args)
 
         # metric objects for calculating and averaging accuracy across batches
-        # self.train_acc = Accuracy(task="multiclass", num_classes=10)
-        # self.val_acc = Accuracy(task="multiclass", num_classes=10)
-        # self.test_acc = Accuracy(task="multiclass", num_classes=10)
+        self.train_acc = Accuracy(task="multiclass", num_classes=10)
+        self.val_acc = Accuracy(task="multiclass", num_classes=10)
+        self.test_acc = Accuracy(task="multiclass", num_classes=10)
 
         # for averaging loss across batches
         self.train_loss = MeanMetric()
@@ -62,24 +63,20 @@ class DETRModule(LightningModule):
         x, y = batch
         logits = self.forward(x)
         loss = self.criterion(logits, y)
-        preds = torch.argmax(logits, dim=1)
-        return loss, preds, y
+        logits["pred_logits"] = torch.argmax(logits["pred_logits"], dim=2)
+        return loss, logits, y
 
     def training_step(self, batch: Any, batch_idx: int):
         loss, preds, targets = self.model_step(batch)
 
         # update and log metrics
-        self.train_loss(loss)
-        self.train_acc(preds, targets)
+        self.train_loss(loss["loss_ce"])
         self.log(
             "train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True
         )
-        self.log(
-            "train/acc", self.train_acc, on_step=False, on_epoch=True, prog_bar=True
-        )
 
         # return loss or backpropagation will fail
-        return loss
+        return loss["loss_ce"]
 
     def on_train_epoch_end(self):
         pass
@@ -88,10 +85,8 @@ class DETRModule(LightningModule):
         loss, preds, targets = self.model_step(batch)
 
         # update and log metrics
-        self.val_loss(loss)
-        self.val_acc(preds, targets)
+        self.val_loss(loss["loss_ce"])
         self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/acc", self.val_acc, on_step=False, on_epoch=True, prog_bar=True)
 
     def on_validation_epoch_end(self):
         acc = self.val_acc.compute()  # get current val acc
