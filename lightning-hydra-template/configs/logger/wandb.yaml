@@ -6,7 +6,7 @@ wandb:
   save_dir: "${paths.output_dir}"
   offline: False
   id: null # pass correct id to resume experiment!
-  anonymous: null # enable anonymous logging
+  anonymous: GH # enable anonymous logging
   project: "lightning-hydra-template"
   log_model: False # upload lightning ckpts
   prefix: "" # a string to put at the beginning of metric keys
