@@ -2,9 +2,8 @@ from typing import Any
 
 import torch
 from lightning import LightningModule
-from torchmetrics import MaxMetric, MeanMetric
-from torchmetrics.classification.accuracy import Accuracy
 from src.models.detr.models import build_model
+import src.models.detr.util.misc as utils
 
 
 class DETRModule(LightningModule):
@@ -36,18 +35,8 @@ class DETRModule(LightningModule):
 
         self.net, self.criterion, self.postprocessors = build_model(args)
 
-        # metric objects for calculating and averaging accuracy across batches
-        self.train_acc = Accuracy(task="multiclass", num_classes=10)
-        self.val_acc = Accuracy(task="multiclass", num_classes=10)
-        self.test_acc = Accuracy(task="multiclass", num_classes=10)
-
-        # for averaging loss across batches
-        self.train_loss = MeanMetric()
-        self.val_loss = MeanMetric()
-        self.test_loss = MeanMetric()
-
-        # for tracking best so far validation accuracy
-        self.val_acc_best = MaxMetric()
+        self.train_metric_logger = self.make_metric("train")
+        self.val_metric_logger = self.make_metric("val")
 
     def forward(self, x: torch.Tensor):
         return self.net(x)
@@ -55,56 +44,92 @@ class DETRModule(LightningModule):
     def on_train_start(self):
         # by default lightning executes validation step sanity checks before training starts,
         # so it's worth to make sure validation metrics don't store results from these checks
-        self.val_loss.reset()
-        self.val_acc.reset()
-        self.val_acc_best.reset()
+        pass
 
     def model_step(self, batch: Any):
         x, y = batch
         logits = self.forward(x)
         loss = self.criterion(logits, y)
-        logits["pred_logits"] = torch.argmax(logits["pred_logits"], dim=2)
-        return loss, logits, y
+        return loss
 
     def training_step(self, batch: Any, batch_idx: int):
-        loss, preds, targets = self.model_step(batch)
+        loss = self.model_step(batch)
+        losses = sum(
+            loss[k] * self.criterion.weight_dict[k]
+            for k in loss.keys()
+            if k in self.criterion.weight_dict
+        )
 
         # update and log metrics
-        self.train_loss(loss["loss_ce"])
+        loss_reduced = utils.reduce_dict(loss)
+        loss_reduced_unscaled = {f"{k}_unscaled": v for k, v in loss_reduced.items()}
+        loss_reduced_scaled = {
+            k: v * self.criterion.weight_dict[k]
+            for k, v in loss_reduced.items()
+            if k in self.criterion.weight_dict
+        }
+        losses_reduced_scaled = sum(loss_reduced_scaled.values())
+        loss_value = losses_reduced_scaled.item()
+        self.train_metric_logger.update(
+            loss=loss_value, **loss_reduced_scaled, **loss_reduced_unscaled
+        )
+        self.train_metric_logger.update(class_error=loss_reduced["class_error"])
+
         self.log(
-            "train/loss", self.train_loss, on_step=False, on_epoch=True, prog_bar=True
+            f"train_loss",
+            losses,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
         )
 
         # return loss or backpropagation will fail
-        return loss["loss_ce"]
+        return losses
 
     def on_train_epoch_end(self):
-        pass
+        self.train_metric_logger.synchronize_between_processes()
+        print("Averaged stats:", self.train_metric_logger)
+        self.train_metric_logger = self.make_metric("train")
 
     def validation_step(self, batch: Any, batch_idx: int):
-        loss, preds, targets = self.model_step(batch)
-
+        loss = self.model_step(batch)
+        losses = sum(
+            loss[k] * self.criterion.weight_dict[k]
+            for k in loss.keys()
+            if k in self.criterion.weight_dict
+        )
         # update and log metrics
-        self.val_loss(loss["loss_ce"])
-        self.log("val/loss", self.val_loss, on_step=False, on_epoch=True, prog_bar=True)
+        loss_dict_reduced = utils.reduce_dict(loss)
+        loss_dict_reduced_scaled = {
+            k: v * self.criterion.weight_dict[k]
+            for k, v in loss_dict_reduced.items()
+            if k in self.criterion.weight_dict
+        }
+        loss_dict_reduced_unscaled = {
+            f"{k}_unscaled": v for k, v in loss_dict_reduced.items()
+        }
+        self.val_metric_logger.update(
+            loss=sum(loss_dict_reduced_scaled.values()),
+            **loss_dict_reduced_scaled,
+            **loss_dict_reduced_unscaled,
+        )
+        self.val_metric_logger.update(class_error=loss_dict_reduced["class_error"])
+
+        self.log(
+            f"val_loss",
+            losses,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+        )
 
     def on_validation_epoch_end(self):
-        acc = self.val_acc.compute()  # get current val acc
-        self.val_acc_best(acc)  # update best so far val acc
-        # log `val_acc_best` as a value through `.compute()` method, instead of as a metric object
-        # otherwise metric would be reset by lightning after each epoch
-        self.log("val/acc_best", self.val_acc_best.compute(), prog_bar=True)
+        self.val_metric_logger.synchronize_between_processes()
+        print("Averaged stats:", self.val_metric_logger)
+        self.val_metric_logger = self.make_metric("val")
 
     def test_step(self, batch: Any, batch_idx: int):
-        loss, preds, targets = self.model_step(batch)
-
-        # update and log metrics
-        self.test_loss(loss)
-        self.test_acc(preds, targets)
-        self.log(
-            "test/loss", self.test_loss, on_step=False, on_epoch=True, prog_bar=True
-        )
-        self.log("test/acc", self.test_acc, on_step=False, on_epoch=True, prog_bar=True)
+        pass
 
     def on_test_epoch_end(self):
         pass
@@ -128,8 +153,25 @@ class DETRModule(LightningModule):
                     "frequency": 1,
                 },
             }
+        self.train_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         return {"optimizer": optimizer}
+
+    def make_metric(self, type):
+        if type == "train":
+            metric_logger = utils.MetricLogger(delimiter="  ")
+            metric_logger.add_meter(
+                "lr", utils.SmoothedValue(window_size=1, fmt="{value:.6f}")
+            )
+            metric_logger.add_meter(
+                "class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}")
+            )
+        elif type == "val":
+            metric_logger = utils.MetricLogger(delimiter="  ")
+            metric_logger.add_meter(
+                "class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}")
+            )
+        return metric_logger
 
 
 if __name__ == "__main__":
-    from detr import DETR
+    pass
