@@ -35,8 +35,8 @@ class DETRModule(LightningModule):
 
         self.net, self.criterion, self.postprocessors = build_model(args)
 
-        self.train_metric_logger = self.make_metric("train")
-        self.val_metric_logger = self.make_metric("val")
+        self.train_metric = self.make_metric("train")
+        self.val_metric = self.make_metric("val")
 
     def forward(self, x: torch.Tensor):
         return self.net(x)
@@ -61,43 +61,49 @@ class DETRModule(LightningModule):
         )
 
         # update and log metrics
-        loss_reduced = utils.reduce_dict(loss)
-        loss_reduced_unscaled = {f"{k}_unscaled": v for k, v in loss_reduced.items()}
-        loss_reduced_scaled = {
+        loss_dict_reduced = utils.reduce_dict(loss)
+        loss_dict_reduced_unscaled = {
+            f"{k}_unscaled": v for k, v in loss_dict_reduced.items()
+        }
+        loss_dict_reduced_scaled = {
             k: v * self.criterion.weight_dict[k]
-            for k, v in loss_reduced.items()
+            for k, v in loss_dict_reduced.items()
             if k in self.criterion.weight_dict
         }
-        losses_reduced_scaled = sum(loss_reduced_scaled.values())
+        losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
+
         loss_value = losses_reduced_scaled.item()
-        self.train_metric_logger.update(
-            loss=loss_value, **loss_reduced_scaled, **loss_reduced_unscaled
+        self.train_metric.update(
+            loss=loss_value, **loss_dict_reduced_scaled, **loss_dict_reduced_unscaled
         )
-        self.train_metric_logger.update(class_error=loss_reduced["class_error"])
-
-        self.log(
-            f"train_loss",
-            losses,
-            on_step=False,
-            on_epoch=True,
+        self.train_metric.update(class_error=loss_dict_reduced["class_error"])
+        self.train_metric.update(lr=self.optimizers().param_groups[0]["lr"])
+        self.log_dict(
+            {
+                f"train_step/{k}": meter.value
+                for k, meter in self.train_metric.meters.items()
+            },
+            on_step=True,
+            on_epoch=False,
             prog_bar=True,
+            batch_size=len(batch[1]),
         )
-
         # return loss or backpropagation will fail
         return losses
 
     def on_train_epoch_end(self):
-        self.train_metric_logger.synchronize_between_processes()
-        print("Averaged stats:", self.train_metric_logger)
-        self.train_metric_logger = self.make_metric("train")
+        self.train_metric.synchronize_between_processes()
+        self.log_dict(
+            {
+                f"train_epoch/{k}": meter.global_avg
+                for k, meter in self.train_metric.meters.items()
+            },
+        )
+        self.train_metric = self.make_metric("train")
 
     def validation_step(self, batch: Any, batch_idx: int):
         loss = self.model_step(batch)
-        losses = sum(
-            loss[k] * self.criterion.weight_dict[k]
-            for k in loss.keys()
-            if k in self.criterion.weight_dict
-        )
+
         # update and log metrics
         loss_dict_reduced = utils.reduce_dict(loss)
         loss_dict_reduced_scaled = {
@@ -108,25 +114,22 @@ class DETRModule(LightningModule):
         loss_dict_reduced_unscaled = {
             f"{k}_unscaled": v for k, v in loss_dict_reduced.items()
         }
-        self.val_metric_logger.update(
+        self.val_metric.update(
             loss=sum(loss_dict_reduced_scaled.values()),
             **loss_dict_reduced_scaled,
             **loss_dict_reduced_unscaled,
         )
-        self.val_metric_logger.update(class_error=loss_dict_reduced["class_error"])
-
-        self.log(
-            f"val_loss",
-            losses,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-        )
+        self.val_metric.update(class_error=loss_dict_reduced["class_error"])
 
     def on_validation_epoch_end(self):
-        self.val_metric_logger.synchronize_between_processes()
-        print("Averaged stats:", self.val_metric_logger)
-        self.val_metric_logger = self.make_metric("val")
+        self.val_metric.synchronize_between_processes()
+        self.log_dict(
+            {
+                f"val/{k}": meter.global_avg
+                for k, meter in self.val_metric.meters.items()
+            }
+        )
+        self.val_metric = self.make_metric("val")
 
     def test_step(self, batch: Any, batch_idx: int):
         pass
@@ -149,11 +152,10 @@ class DETRModule(LightningModule):
                 "lr_scheduler": {
                     "scheduler": scheduler,
                     "monitor": "val/loss",
-                    "interval": "epoch",
+                    "interval": "step",
                     "frequency": 1,
                 },
             }
-        self.train_metric_logger.update(lr=optimizer.param_groups[0]["lr"])
         return {"optimizer": optimizer}
 
     def make_metric(self, type):
@@ -171,7 +173,3 @@ class DETRModule(LightningModule):
                 "class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}")
             )
         return metric_logger
-
-
-if __name__ == "__main__":
-    pass
