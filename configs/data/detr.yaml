@@ -1,0 +1,11 @@
+_target_: src.data.detr_datamodule.DETRDataModule
+data_dir: ${paths.data_dir}
+train_img_folder: ${paths.data_dir}train2017
+train_ann_file: ${paths.data_dir}annotations/instances_train2017.json
+val_img_folder: ${paths.data_dir}val2017
+val_ann_file: ${paths.data_dir}annotations/instances_val2017.json
+return_masks: False
+batch_size: 5
+num_workers: 2
+pin_memory: True
+
